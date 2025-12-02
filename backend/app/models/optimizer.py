@@ -5,35 +5,85 @@ from typing import List, Tuple
 from app.schemas import Suggestion
 import re
 
+# Curated list of common technical keywords we want to detect.
+TECHNICAL_SKILLS = {
+    # Languages
+    'python', 'java', 'javascript', 'typescript', 'c++', 'c#', 'go', 'rust', 'swift',
+    'kotlin', 'php', 'ruby', 'r', 'scala', 'matlab',
+    # Frameworks & libraries
+    'react', 'angular', 'vue', 'node.js', 'express', 'django', 'flask', 'spring',
+    'laravel', 'rails', 'asp.net',
+    # Databases
+    'sql', 'mysql', 'postgresql', 'mongodb', 'redis', 'elasticsearch', 'dynamodb',
+    # Cloud & devops
+    'aws', 'azure', 'gcp', 'docker', 'kubernetes', 'jenkins', 'terraform', 'ansible',
+    'ci/cd', 'github actions', 'gitlab',
+    # Tools & platforms
+    'git', 'linux', 'rest api', 'graphql', 'microservices', 'agile', 'scrum',
+    # Data / ML
+    'machine learning', 'deep learning', 'data science', 'pandas', 'numpy',
+    'tensorflow', 'pytorch', 'scikit-learn', 'spark', 'hadoop',
+    # Frontend
+    'html', 'css', 'sass', 'webpack', 'babel', 'npm', 'yarn'
+}
+
+# Stop words (non-skills) to filter out during extraction.
+STOP_WORDS = {
+    'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'having',
+    'do', 'does', 'did', 'doing', 'a', 'an', 'the', 'and', 'or', 'but', 'if', 'then',
+    'else', 'when', 'where', 'how', 'why', 'what', 'who', 'which', 'that', 'this',
+    'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her',
+    'us', 'them', 'my', 'your', 'his', 'her', 'its', 'our', 'their', 'should', 'would',
+    'could', 'may', 'might', 'must', 'can', 'will', 'shall', 'seek', 'seeking',
+    'ideal', 'candidate', 'looking', 'want', 'needs', 'need', 'required', 'requires',
+    'requirement', 'requirements', 'years', 'year', 'experience', 'experiences',
+    'platform', 'platforms', 'responsible', 'responsibilities'
+}
+
 
 def extract_skills_from_text(text: str) -> List[str]:
     """
-    Extract potential skills/keywords from text.
-    
-    Args:
-        text: Input text
-        
-    Returns:
-        List of extracted skills/keywords
+    Extract potential technical skills/keywords from text.
     """
-    # Common technical skills patterns
-    skill_patterns = [
-        r'\b(python|java|javascript|react|node\.js|aws|docker|kubernetes|sql|git)\b',
-        r'\b(machine learning|data science|web development|software engineering)\b',
-        r'\b([A-Z]{2,})\b',  # Acronyms (AWS, API, etc.)
-    ]
-    
-    skills = set()
+    if not text:
+        return []
+
     text_lower = text.lower()
-    
-    for pattern in skill_patterns:
+    skills = set()
+
+    # Match curated technical skills by substring.
+    for skill in TECHNICAL_SKILLS:
+        if skill in text_lower:
+            skills.add(skill)
+
+    # Capture acronyms with 2-5 uppercase letters (e.g., AWS, API).
+    acronyms = re.findall(r'\b[A-Z]{2,5}\b', text)
+    for acronym in acronyms:
+        acronym_lower = acronym.lower()
+        if acronym_lower not in STOP_WORDS:
+            skills.add(acronym_lower)
+
+    # Additional multi-word patterns not covered by simple lookup.
+    multi_word_patterns = [
+        r'\b(machine learning|deep learning|data science|web development|software engineering|cloud computing|devops|full stack|front end|back end|ui/ux)\b',
+        r'\b(node\.js|react\.js|angular\.js|rest api|graphql api)\b'
+    ]
+    for pattern in multi_word_patterns:
         matches = re.findall(pattern, text_lower, re.IGNORECASE)
-        if isinstance(matches[0], tuple) if matches else False:
-            skills.update([m[0] if isinstance(m, tuple) else m for m in matches])
-        else:
-            skills.update(matches)
-    
-    return list(skills)
+        for match in matches:
+            if isinstance(match, tuple):
+                skills.update(match)
+            else:
+                skills.add(match)
+
+    # Remove stop words and very short tokens.
+    filtered_skills = {
+        skill.strip()
+        for skill in skills
+        if skill and skill not in STOP_WORDS and len(skill) > 2
+    }
+
+    return sorted(filtered_skills)
 
 
 def generate_optimization_suggestions(
@@ -59,16 +109,30 @@ def generate_optimization_suggestions(
     
     # Find missing skills
     missing_skills = job_skills - resume_skills
+
+    # Prioritize critical skills first.
+    priority_skills = {
+        'python', 'java', 'javascript', 'react', 'node.js', 'aws',
+        'docker', 'kubernetes', 'sql', 'machine learning', 'data science'
+    }
+    missing_skills_sorted = sorted(
+        missing_skills,
+        key=lambda skill: (skill not in priority_skills, skill)
+    )
     
-    # Create suggestions for missing skills
-    for skill in list(missing_skills)[:10]:  # Limit to top 10
+    # Create suggestions for missing skills (limit to 10 meaningful skills)
+    for skill in missing_skills_sorted:
+        if skill in STOP_WORDS or len(skill) < 3:
+            continue
         missing_keywords.append(skill)
         suggestions.append(Suggestion(
             category="missing_skill",
             title=f"Add {skill.title()} Experience",
             description=f"The job description mentions {skill}, but it's not clearly present in your resume. Consider adding relevant experience or projects involving {skill}.",
-            priority="high" if skill in ['python', 'java', 'javascript', 'aws'] else "medium"
+            priority="high" if skill in priority_skills else "medium"
         ))
+        if len(missing_keywords) >= 10:
+            break
     
     # Basic phrasing suggestions (placeholder - can be enhanced)
     if len(resume_text.split()) < 200:
@@ -106,8 +170,14 @@ def calculate_ats_score(
         ATS compatibility score (0-100)
     """
     # Extract keywords from job description
-    job_keywords = set(extract_skills_from_text(job_description))
-    resume_keywords = set(extract_skills_from_text(resume_text))
+    job_keywords = {
+        keyword for keyword in extract_skills_from_text(job_description)
+        if keyword not in STOP_WORDS
+    }
+    resume_keywords = {
+        keyword for keyword in extract_skills_from_text(resume_text)
+        if keyword not in STOP_WORDS
+    }
     
     # Keyword match percentage (30% weight)
     if len(job_keywords) > 0:
